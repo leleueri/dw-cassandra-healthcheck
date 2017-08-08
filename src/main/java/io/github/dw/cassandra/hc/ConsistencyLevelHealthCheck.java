@@ -2,9 +2,11 @@ package io.github.dw.cassandra.hc;
 
 import com.codahale.metrics.health.HealthCheck;
 import com.datastax.driver.core.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
-import java.util.function.Function;
+import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
 
@@ -12,6 +14,8 @@ import java.util.stream.Collectors;
  * Created by eric on 01/08/17.
  */
 public class ConsistencyLevelHealthCheck extends HealthCheck {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(ConsistencyLevelHealthCheck.class);
 
     private final ConsistencyLevel expectedCL;
 
@@ -25,7 +29,10 @@ public class ConsistencyLevelHealthCheck extends HealthCheck {
         this(consistencyLevel, keyspace, null, cassandraCluster);
     }
 
-    public ConsistencyLevelHealthCheck(ConsistencyLevel consistencyLevel, String keyspace, String datacenter, Cluster cassandraCluster) {
+    public ConsistencyLevelHealthCheck(ConsistencyLevel consistencyLevel, String keyspace, String datacenter,
+                                       Cluster cassandraCluster) {
+        LOGGER.debug("Initialize Cassandra HealthCheck with kespace '{}', consistencyLevel '{}' and localDc '{}'",
+                keyspace, consistencyLevel, datacenter);
         this.expectedCL = consistencyLevel;
         this.keyspace = keyspace;
         this.cassandraCluster = cassandraCluster;
@@ -41,10 +48,9 @@ public class ConsistencyLevelHealthCheck extends HealthCheck {
 
         List<Status> invalidStatus = metadata.getTokenRanges().stream()
                 .map(this::evalConsistencyLevel)
-                .filter(status -> !status.isValid())
+                .filter(status -> status.isInvalid())
         .collect(Collectors.toList());
 
-        // TODO add logs ??
         if (invalidStatus.isEmpty()) {
             return Result.healthy("ConsistencyLevel '%s' is reached for Keyspace '%s'", keyspace, expectedCL);
         } else {
@@ -53,11 +59,15 @@ public class ConsistencyLevelHealthCheck extends HealthCheck {
     }
 
     protected Status evalConsistencyLevel(TokenRange range) {
-        // TODO add logs
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("Check consistency level '{}' on keyspace '{}' for TokenRange {}",
+                    this.expectedCL, this.keyspace, range);
+        }
+
         final Set<Host> hosts = metadata.getReplicas(keyspace, range);
         final int numberOfReplicas = hosts.size();
         final Map<String, List<Host>> hostsByDC = hosts.stream().collect(Collectors.groupingBy(Host::getDatacenter));
-
+        final List<Host> localNodes = hostsByDC.get(this.localDc);
         Status result = new Status(true, range, hosts);
         switch (expectedCL) {
             case ALL:
@@ -77,13 +87,16 @@ public class ConsistencyLevelHealthCheck extends HealthCheck {
                 break;
 
             case LOCAL_ONE:
-                if (getAvailableReplicas(hostsByDC.get(this.localDc)) == 0) result = new Status(false, range, hosts);
+                if (localNodes == null) {
+                    LOGGER.warn("No hosts found for DataCenter : {}", this.localDc);
+                } else if (getAvailableReplicas(localNodes) == 0) result = new Status(false, range, hosts);
                 break;
 
             case LOCAL_QUORUM:
             case LOCAL_SERIAL:
-                List<Host> localNodes = hostsByDC.get(this.localDc);
-                if (getAvailableReplicas(localNodes) < nodesForQuorum(localNodes.size())) result = new Status(false, range, hosts);
+                if (localNodes == null) {
+                    LOGGER.warn("No hosts found for DataCenter : {}", this.localDc);
+                } else if (getAvailableReplicas(localNodes) < nodesForQuorum(localNodes.size())) result = new Status(false, range, hosts);
                 break;
 
             case EACH_QUORUM:
@@ -98,7 +111,11 @@ public class ConsistencyLevelHealthCheck extends HealthCheck {
                 break;
         }
 
-        return null;
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("Check consistency level '{}' on keyspace '{}' for TokenRange {} = {}",
+                    this.expectedCL, this.keyspace, range, result.isValid() ? "OK" : "KO");
+        }
+        return result;
     }
 
     private long getAvailableReplicas(Collection<Host> hosts) {
@@ -123,6 +140,10 @@ public class ConsistencyLevelHealthCheck extends HealthCheck {
 
         public boolean isValid() {
             return this.clReached;
+        }
+
+        public boolean isInvalid() {
+            return !this.clReached;
         }
 
         public TokenRange getTokenRange() {

@@ -1,0 +1,2 @@
+The ConsistencyLevelHealthCheck is based on the Host.status provided by the Datastax Java Driver.
+Remember that this value may be inaccurate. (see drive javadoc)
